@@ -1,1 +1,13 @@
-
+streamlit
+pandas
+numpy
+matplotlib
+seaborn
+plotly
+altair
+scipy
+statsmodels
+scikit-learn
+pyarrow
+fastparque
+python-dateutil

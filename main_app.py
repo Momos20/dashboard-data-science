@@ -46,9 +46,10 @@ def try_parse_datetime(df):
             try:
                 parsed = pd.to_datetime(df[c], errors="coerce")
                 if parsed.notna().mean() > 0.6:
+                    df = df.copy()
                     df[c] = parsed
                     return df, c
-            except:
+            except Exception:
                 pass
     return df, None
 
@@ -104,7 +105,7 @@ with tab2:
             use_container_width=True
         )
 
-    st.write("Filas duplicadas:", df.duplicated().sum())
+    st.write("Filas duplicadas:", int(df.duplicated().sum()))
 
 # -----------------------------
 # Tab 3 – Stats
@@ -125,8 +126,8 @@ with tab4:
     if not num_cols:
         st.warning("No hay columnas numéricas")
     else:
-        col = st.selectbox("Variable", num_cols)
-        bins = st.slider("Bins", 10, 100, 40)
+        col = st.selectbox("Variable", num_cols, key="var_dist")  # <-- KEY ÚNICA
+        bins = st.slider("Bins", 10, 100, 40, key="bins_dist")    # <-- KEY ÚNICA
 
         st.plotly_chart(px.histogram(df, x=col, nbins=bins), use_container_width=True)
         st.plotly_chart(px.box(df, y=col), use_container_width=True)
@@ -135,20 +136,23 @@ with tab4:
 # Tab 5 – Correlation & Time
 # -----------------------------
 with tab5:
-    num_cols = df.select_dtypes(include=np.number).columns
+    num_cols = df.select_dtypes(include=np.number).columns.tolist()
 
     if len(num_cols) > 1:
         corr = df[num_cols].corr()
         fig, ax = plt.subplots()
         sns.heatmap(corr, cmap="coolwarm", ax=ax)
         st.pyplot(fig)
-
-    if dt_col:
-        st.subheader("Serie temporal")
-        y = st.selectbox("Variable", num_cols)
-        st.plotly_chart(px.line(df, x=dt_col, y=y), use_container_width=True)
     else:
-        st.info("No se detectó columna de fecha")
+        st.info("Se requiere al menos 2 columnas numéricas para correlación.")
+
+    if dt_col and num_cols:
+        st.subheader("Serie temporal")
+        y = st.selectbox("Variable", num_cols, key="var_time")  # <-- KEY ÚNICA
+        st.plotly_chart(px.line(df, x=dt_col, y=y), use_container_width=True)
+    elif not dt_col:
+        st.info("No se detectó columna de fecha.")
+    else:
+        st.info("No hay columnas numéricas para graficar en el tiempo.")
 
 st.caption("EDA interactivo – listo para Streamlit Cloud")
-

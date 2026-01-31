@@ -26,6 +26,7 @@ st.markdown(
 st.title("📊 EDA Multinodal")
 st.caption("Funciona con cualquier CSV. 4 pestañas: Cuantitativo, Cualitativo, Gráfico dinámico, Asistente (Groq).")
 
+# Helper para evitar DuplicateElementId en charts
 def show_plot(fig, key: str):
     st.plotly_chart(fig, use_container_width=True, key=key)
 
@@ -263,7 +264,7 @@ with st.expander("Vista rápida (primeras filas)", expanded=False):
 def build_eda_profile_for_llm(df: pd.DataFrame, num_cols, cat_cols, dt_cols) -> dict:
     """
     Perfil compacto (no manda el dataset completo).
-    Nota: mantiene límites internos razonables para no reventar tokens.
+    Mantiene límites internos razonables para no reventar tokens.
     """
     prof = {
         "shape": {"rows": int(df.shape[0]), "cols": int(df.shape[1])},
@@ -342,7 +343,6 @@ def build_eda_profile_for_llm(df: pd.DataFrame, num_cols, cat_cols, dt_cols) -> 
                 }
         prof["datetime_summary"]["ranges"] = dt_summary
 
-    # Muestra pequeña fija (solo 8 filas) para contexto mínimo
     prof["sample_head"] = df.head(8).astype("string").to_dict(orient="records")
     return prof
 
@@ -356,7 +356,7 @@ def groq_chat_completion(api_key: str, model: str, system: str, user: str) -> st
             {"role": "user", "content": user},
         ],
         temperature=0.2,
-        max_tokens=900,
+        max_tokens=1600,  # <-- más espacio para respuesta detallada en prosa
     )
     return completion.choices[0].message.content
 
@@ -462,7 +462,6 @@ with tab_ql:
         topn = st.slider("Top N categorías", 5, 80, 15, key="ql_cat_topn")
         vc = df[col].astype("string").value_counts(dropna=False).head(topn).reset_index()
         vc.columns = [col, "conteo"]
-
         fig_cat = px.bar(vc, x="conteo", y=col, orientation="h", title=f"Top {topn}: {col}")
         show_plot(fig_cat, key="ql_cat_bar")
 
@@ -537,11 +536,11 @@ with tab_g:
             show_plot(fig, key="g_corr_plot")
 
 # ============================================================
-# ASISTENTE (GROQ) - EDA GLOBAL
+# ASISTENTE (GROQ) - TEXTO CONTINUO Y DETALLADO
 # ============================================================
 with tab_ai:
     st.subheader("🤖 Asistente de análisis (Groq)")
-    st.caption("Genera un EDA global y accionable usando un perfil compacto del dataset. No depende del gráfico seleccionado.")
+    st.caption("Genera un informe de EDA global en prosa continua, detallado, y accionable.")
 
     if "groq_analysis_text" not in st.session_state:
         st.session_state["groq_analysis_text"] = ""
@@ -576,29 +575,49 @@ with tab_ai:
             st.error("Ingrese una GROQ API Key válida para ejecutar el análisis.")
         else:
             with st.spinner("Generando análisis con Groq..."):
-                profile = build_eda_profile_for_llm(
-                    df=df,
-                    num_cols=num_cols,
-                    cat_cols=cat_cols,
-                    dt_cols=dt_cols
-                )
+                profile = build_eda_profile_for_llm(df=df, num_cols=num_cols, cat_cols=cat_cols, dt_cols=dt_cols)
 
                 system_prompt = (
-                    "Eres un analista senior de datos. Tu tarea es redactar un análisis exploratorio (EDA) "
-                    "de forma profesional y accionable, basado en un perfil del dataset. "
+                    "Eres un analista senior de datos. Escribes como en un informe técnico de EDA para negocio y modelado. "
+                    "Redacta en español, en texto continuo (prosa), sin listas con viñetas salvo que sea estrictamente necesario. "
                     "No inventes valores: usa únicamente lo que está en el perfil. "
-                    "Estructura la respuesta con encabezados y bullets claros."
+                    "Cuando falte información, dilo explícitamente. "
+                    "Incluye interpretación, implicaciones y recomendaciones accionables."
                 )
 
                 user_prompt = f"""
-Con base en este perfil del dataset (dict/JSON), genere un EDA GLOBAL:
+Con base en este perfil del dataset (dict/JSON), redacte un INFORME DE EDA en prosa continua, detallado y coherente.
+Use encabezados, pero dentro de cada sección escriba párrafos (no bullets).
 
-1) Resumen ejecutivo (3-6 bullets).
-2) Estadística descriptiva relevante (numéricas: rangos, dispersión, sesgos; categóricas: concentración).
-3) Hallazgos importantes: variables dominantes, correlaciones fuertes (si existen), outliers/ceros, calidad de datos.
-4) Riesgos y advertencias: nulos, duplicados, tipos sospechosos, variables casi constantes, posibles errores de captura.
-5) Recomendaciones prácticas: qué limpiar, qué transformar (log/escala), qué variables revisar para modelado.
-6) Si hay datetime: sugerir análisis temporal posible.
+Estructura requerida:
+
+## 1. Contexto y alcance
+Explique qué se puede inferir del dataset según su forma (filas/columnas), tipos, nulos y duplicados.
+Aclare limitaciones del perfil (no se dispone del dataset completo).
+
+## 2. Calidad de datos
+Analice nulos (magnitud, posibles patrones), duplicados y riesgos de tipado (por ejemplo, columnas object que parecen numéricas).
+Explique impactos sobre análisis y modelado.
+
+## 3. Análisis de variables numéricas
+Interprete rangos, dispersión, asimetrías potenciales (por percentiles), presencia de ceros y outliers (IQR).
+Indique qué transformaciones tendrían sentido (log, winsorización, escalamiento) y por qué.
+
+## 4. Análisis de variables categóricas
+Analice concentración (top values), cardinalidad (nunique), riesgos (categorías raras, alta cardinalidad, categorías dominantes).
+Sugiera codificación (one-hot, target encoding, agrupación de raras) según el escenario.
+
+## 5. Relaciones entre variables (si aplica)
+Si hay correlaciones fuertes, interprete posibles relaciones (sin asumir causalidad).
+Sugiera validaciones adicionales (scatter por segmentos, revisar multicolinealidad, VIF si procede).
+
+## 6. Componente temporal (si hay datetime)
+Interprete rangos de fechas, qué análisis temporales serían valiosos (tendencias, estacionalidad, drift, ventanas).
+Sugiera features temporales.
+
+## 7. Recomendaciones finales y próximos pasos
+Proponga un plan de limpieza y preparación en orden: tipado, nulos, duplicados, outliers, codificación, partición train/test.
+Cierre con qué gráficos adicionales haría y qué preguntas de negocio/modelo podría responder.
 
 Enfoque adicional del usuario (si aplica): {extra_focus if extra_focus.strip() else "N/A"}
 
@@ -617,8 +636,9 @@ Perfil:
                     st.error(f"Error llamando a Groq: {e}")
 
     if st.session_state["groq_analysis_text"]:
-        st.markdown("### 🧾 Análisis generado")
-        st.write(st.session_state["groq_analysis_text"])
+        st.markdown("### 🧾 Informe generado")
+        # Render como markdown para que se vean bien los encabezados y el texto continuo
+        st.markdown(st.session_state["groq_analysis_text"])
         st.download_button(
             "⬇️ Descargar análisis (.txt)",
             data=st.session_state["groq_analysis_text"].encode("utf-8"),
@@ -628,7 +648,6 @@ Perfil:
             key="groq_download"
         )
     else:
-        st.info("Configure la API Key y presione **Generar análisis descriptivo** para obtener hallazgos y conclusiones.")
+        st.info("Configure la API Key y presione **Generar análisis descriptivo** para obtener el informe.")
 
 st.caption("EDA multinodal y agnóstico al dataset ✅")
-

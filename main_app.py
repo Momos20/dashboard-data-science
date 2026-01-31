@@ -26,21 +26,25 @@ st.markdown(
 st.title("📊 EDA Multinodal")
 st.caption("Funciona con cualquier CSV. 4 pestañas: Cuantitativo, Cualitativo, Gráfico dinámico, Asistente (Groq).")
 
+# Helper para evitar DuplicateElementId en charts
+def show_plot(fig, key: str):
+    st.plotly_chart(fig, use_container_width=True, key=key)
+
 # ============================================================
 # SIDEBAR - CONTROLES
 # ============================================================
 st.sidebar.header("⚙️ Ingesta")
 uploaded = st.sidebar.file_uploader("Suba su CSV", type=["csv"])
 
-if st.sidebar.button("🧹 Limpiar caché y recargar"):
+if st.sidebar.button("🧹 Limpiar caché y recargar", key="btn_clear_cache"):
     st.cache_data.clear()
     st.rerun()
 
 with st.sidebar.expander("Opciones de lectura", expanded=False):
-    sep_in = st.text_input("Separador (opcional)", value="")
-    encoding_in = st.text_input("Encoding (opcional)", value="")
-    decimal_in = st.text_input("Decimal (opcional: '.' o ',')", value="")
-    na_values_in = st.text_input("NA values (coma-separado)", value="")
+    sep_in = st.text_input("Separador (opcional)", value="", key="read_sep")
+    encoding_in = st.text_input("Encoding (opcional)", value="", key="read_enc")
+    decimal_in = st.text_input("Decimal (opcional: '.' o ',')", value="", key="read_dec")
+    na_values_in = st.text_input("NA values (coma-separado)", value="", key="read_na")
 
 def clean_optional_str(x: str):
     x = (x or "").strip()
@@ -59,15 +63,18 @@ else:
     decimal = "."
 
 na_values = [t.strip() for t in (na_values_in or "").split(",") if t.strip()] or None
-auto_fix = st.sidebar.checkbox("Auto-detectar sep/decimal", value=True)
+auto_fix = st.sidebar.checkbox("Auto-detectar sep/decimal", value=True, key="auto_fix")
 
 st.sidebar.header("🧠 Tipado")
-coerce_threshold = st.sidebar.slider("Umbral coerción numérica", 0.50, 0.99, 0.75, 0.01)
-dt_threshold = st.sidebar.slider("Umbral detección datetime", 0.40, 0.99, 0.60, 0.01)
+coerce_threshold = st.sidebar.slider("Umbral coerción numérica", 0.50, 0.99, 0.75, 0.01, key="coerce_thr")
+dt_threshold = st.sidebar.slider("Umbral detección datetime", 0.40, 0.99, 0.60, 0.01, key="dt_thr")
 
 st.sidebar.header("⚡ Rendimiento")
-use_downsample = st.sidebar.checkbox("Downsample para gráficas", value=True)
-downsample_n = st.sidebar.slider("Tamaño downsample", 500, 200000, 5000, step=500) if use_downsample else None
+use_downsample = st.sidebar.checkbox("Downsample para gráficas", value=True, key="use_downsample")
+downsample_n = (
+    st.sidebar.slider("Tamaño downsample", 500, 200000, 5000, step=500, key="downsample_n")
+    if use_downsample else None
+)
 
 # ============================================================
 # NODO 1 - LOADER ROBUSTO (y arregla caso 1-columna)
@@ -115,7 +122,6 @@ def load_csv_smart(file, sep, encoding, decimal, na_values, auto_fix=True):
         commas = sample.str.count(",").mean()
         tabs = sample.str.count("\t").mean()
 
-        # Heurística: el separador más frecuente gana
         best_sep = None
         if max(semicolons, commas, tabs) >= 2:
             if semicolons >= commas and semicolons >= tabs:
@@ -126,7 +132,6 @@ def load_csv_smart(file, sep, encoding, decimal, na_values, auto_fix=True):
                 best_sep = "\t"
 
         if best_sep is not None:
-            # reintento con decimal probable
             for dec in [decimal, ",", "."]:
                 try:
                     df2 = read_csv_try(file, best_sep, encoding, dec, na_values)
@@ -148,21 +153,9 @@ df_raw = load_csv_smart(uploaded, sep, encoding, decimal, na_values, auto_fix=au
 # NODO 2 - COERCIÓN NUMÉRICA (mejorada)
 # ============================================================
 def _normalize_numeric_text(s: pd.Series) -> pd.Series:
-    """
-    Normaliza texto numérico:
-    - elimina moneda/unidades/espacios
-    - soporta porcentajes
-    - soporta negativos con paréntesis: (123) => -123
-    - soporta miles/decimales tanto EU como LATAM
-    """
     x = s.astype("string").str.strip()
-
-    # negativos en paréntesis
-    x = x.str.replace(r"^\((.*)\)$", r"-\1", regex=True)
-
-    # quitar símbolos no numéricos comunes (mantener dígitos, signo, coma, punto)
-    x = x.str.replace(r"[^\d\-\.,]", "", regex=True)
-
+    x = x.str.replace(r"^\((.*)\)$", r"-\1", regex=True)     # negativos en paréntesis
+    x = x.str.replace(r"[^\d\-\.,]", "", regex=True)         # limpiar símbolos
     return x
 
 @st.cache_data(show_spinner=False)
@@ -181,11 +174,11 @@ def coerce_numeric_like_columns(data: pd.DataFrame, threshold=0.75):
         if x.dropna().empty:
             continue
 
-        # variante A: formato LATAM: 1.234,56 -> 1234.56
+        # LATAM: 1.234,56 -> 1234.56
         a = x.str.replace(".", "", regex=False).str.replace(",", ".", regex=False)
         na = pd.to_numeric(a, errors="coerce")
 
-        # variante B: formato US: 1,234.56 -> 1234.56
+        # US: 1,234.56 -> 1234.56
         b = x.str.replace(",", "", regex=False)
         nb = pd.to_numeric(b, errors="coerce")
 
@@ -195,7 +188,6 @@ def coerce_numeric_like_columns(data: pd.DataFrame, threshold=0.75):
         best = na if ok_a >= ok_b else nb
         ok = max(ok_a, ok_b)
 
-        # regla: si convierte bien y no destruye demasiados valores, aceptar
         if ok >= threshold:
             data[c] = best
 
@@ -300,8 +292,7 @@ def build_eda_profile_for_llm(df: pd.DataFrame, num_cols, cat_cols, dt_cols, max
 
     if num_cols:
         num = df[num_cols].copy()
-        desc = num.describe(percentiles=[0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99]).T
-        desc = desc.round(4)
+        desc = num.describe(percentiles=[0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99]).T.round(4)
         prof["numeric_summary"]["describe"] = desc.to_dict()
 
         zeros = {}
@@ -401,14 +392,14 @@ with tab_qt:
         if len(num_cols) < 2:
             st.info("Se requieren al menos 2 columnas numéricas.")
         else:
-            method = st.radio("Método", ["pearson", "spearman"], horizontal=True, key="corr_method")
+            method = st.radio("Método", ["pearson", "spearman"], horizontal=True, key="qt_corr_method")
             corr = df[num_cols].corr(method=method)
 
             corr_tri = corr.copy()
             corr_tri.values[np.triu_indices_from(corr_tri.values, k=1)] = np.nan
             fig = px.imshow(corr_tri, text_auto=True, aspect="auto",
                             title=f"Matriz de correlación ({method}) – triangular")
-            st.plotly_chart(fig, use_container_width=True)
+            show_plot(fig, key="qt_corr_tri")
 
             pairs = (
                 corr.where(np.tril(np.ones(corr.shape), k=-1).astype(bool))
@@ -425,16 +416,16 @@ with tab_qt:
             st.markdown("**Explorar par**")
             cA, cB = st.columns(2)
             with cA:
-                x = st.selectbox("X", num_cols, key="pair_x")
+                x = st.selectbox("X", num_cols, key="qt_pair_x")
             with cB:
-                y = st.selectbox("Y", [c for c in num_cols if c != x], key="pair_y")
+                y = st.selectbox("Y", [c for c in num_cols if c != x], key="qt_pair_y")
 
             rho = corr.loc[x, y]
             st.markdown(f"<div class='card'><b>{method}({x}, {y})</b> = <b>{rho:.4f}</b></div>", unsafe_allow_html=True)
 
             fig2 = px.scatter(df_plot, x=x, y=y, trendline="ols", opacity=0.65,
                               title=f"{y} vs {x} (corr={rho:.4f})")
-            st.plotly_chart(fig2, use_container_width=True)
+            show_plot(fig2, key="qt_scatter_pair")
 
 # ============================================================
 # CUALITATIVO
@@ -467,33 +458,31 @@ with tab_ql:
         with c1:
             st.dataframe(miss_df, use_container_width=True, height=350)
         with c2:
-            st.plotly_chart(px.bar(miss_df, x="columna", y="%", text="%",
-                                   title="Porcentaje de nulos por columna"), use_container_width=True)
+            fig_miss = px.bar(miss_df, x="columna", y="%", text="%", title="Porcentaje de nulos por columna")
+            show_plot(fig_miss, key="ql_missing_bar")
 
     st.metric("Filas duplicadas", f"{int(df.duplicated().sum()):,}")
 
     if cat_cols:
-        col = st.selectbox("Variable categórica", cat_cols, key="cat_col")
-        topn = st.slider("Top N categorías", 5, 80, 15, key="cat_topn")
+        col = st.selectbox("Variable categórica", cat_cols, key="ql_cat_col")
+        topn = st.slider("Top N categorías", 5, 80, 15, key="ql_cat_topn")
         vc = df[col].astype("string").value_counts(dropna=False).head(topn).reset_index()
         vc.columns = [col, "conteo"]
-        st.plotly_chart(px.bar(vc, x="conteo", y=col, orientation="h", title=f"Top {topn}: {col}"),
-                        use_container_width=True)
+
+        fig_cat = px.bar(vc, x="conteo", y=col, orientation="h", title=f"Top {topn}: {col}")
+        show_plot(fig_cat, key="ql_cat_bar")
 
 # ============================================================
-# GRÁFICO DINÁMICO (sin asistente aquí)
+# GRÁFICO DINÁMICO
 # ============================================================
 with tab_g:
     st.subheader("🎛️ Gráfico (dinámico)")
-
     chart_type = st.selectbox(
         "Tipo de gráfico",
         ["Histograma (numérica)", "Boxplot (numérica)", "Scatter (num vs num)",
          "Serie temporal (datetime vs num)", "Barras (categórica)", "Heatmap correlación (numéricas)"],
-        key="chart_type"
+        key="g_chart_type"
     )
-
-    chart_ctx = {"chart_type": chart_type}
 
     if chart_type == "Histograma (numérica)":
         if not num_cols:
@@ -501,18 +490,16 @@ with tab_g:
         else:
             col = st.selectbox("Variable", num_cols, key="g_hist_col")
             bins = st.slider("Bins", 10, 200, 40, key="g_hist_bins")
-            chart_ctx.update({"x": col, "bins": int(bins)})
-            st.plotly_chart(px.histogram(df_plot, x=col, nbins=bins, title=f"Histograma: {col}"),
-                            use_container_width=True)
+            fig = px.histogram(df_plot, x=col, nbins=bins, title=f"Histograma: {col}")
+            show_plot(fig, key="g_hist_plot")
 
     elif chart_type == "Boxplot (numérica)":
         if not num_cols:
             st.warning("No hay columnas numéricas.")
         else:
             col = st.selectbox("Variable", num_cols, key="g_box_col")
-            chart_ctx.update({"y": col})
-            st.plotly_chart(px.box(df_plot, y=col, points="outliers", title=f"Boxplot: {col}"),
-                            use_container_width=True)
+            fig = px.box(df_plot, y=col, points="outliers", title=f"Boxplot: {col}")
+            show_plot(fig, key="g_box_plot")
 
     elif chart_type == "Scatter (num vs num)":
         if len(num_cols) < 2:
@@ -520,9 +507,8 @@ with tab_g:
         else:
             x = st.selectbox("X", num_cols, key="g_scatter_x")
             y = st.selectbox("Y", [c for c in num_cols if c != x], key="g_scatter_y")
-            chart_ctx.update({"x": x, "y": y})
-            st.plotly_chart(px.scatter(df_plot, x=x, y=y, trendline="ols", opacity=0.65, title=f"{y} vs {x}"),
-                            use_container_width=True)
+            fig = px.scatter(df_plot, x=x, y=y, trendline="ols", opacity=0.65, title=f"{y} vs {x}")
+            show_plot(fig, key="g_scatter_plot")
 
     elif chart_type == "Serie temporal (datetime vs num)":
         if not dt_cols:
@@ -532,10 +518,9 @@ with tab_g:
         else:
             dt = st.selectbox("Datetime", dt_cols, key="g_time_dt")
             y = st.selectbox("Y", num_cols, key="g_time_y")
-            chart_ctx.update({"dt": dt, "y": y})
             tmp = df[[dt, y]].dropna().sort_values(dt)
-            st.plotly_chart(px.line(tmp, x=dt, y=y, title=f"Serie temporal: {y}"),
-                            use_container_width=True)
+            fig = px.line(tmp, x=dt, y=y, title=f"Serie temporal: {y}")
+            show_plot(fig, key="g_time_plot")
 
     elif chart_type == "Barras (categórica)":
         if not cat_cols:
@@ -543,31 +528,26 @@ with tab_g:
         else:
             col = st.selectbox("Categoría", cat_cols, key="g_bar_col")
             topn = st.slider("Top N", 5, 80, 15, key="g_bar_topn")
-            chart_ctx.update({"cat": col, "topn": int(topn)})
             vc = df[col].astype("string").value_counts(dropna=False).head(topn).reset_index()
             vc.columns = [col, "conteo"]
-            st.plotly_chart(px.bar(vc, x="conteo", y=col, orientation="h", title=f"Top {topn}: {col}"),
-                            use_container_width=True)
+            fig = px.bar(vc, x="conteo", y=col, orientation="h", title=f"Top {topn}: {col}")
+            show_plot(fig, key="g_bar_plot")
 
     elif chart_type == "Heatmap correlación (numéricas)":
         if len(num_cols) < 2:
             st.info("Se requieren al menos 2 columnas numéricas.")
         else:
             method = st.radio("Método", ["pearson", "spearman"], horizontal=True, key="g_corr_method")
-            chart_ctx.update({"corr_method": method})
             corr = df[num_cols].corr(method=method)
-            st.plotly_chart(px.imshow(corr, aspect="auto", title=f"Heatmap correlación ({method})"),
-                            use_container_width=True)
-
-    # Guardar contexto del gráfico (para que el asistente lo use)
-    st.session_state["chart_context"] = chart_ctx
+            fig = px.imshow(corr, aspect="auto", title=f"Heatmap correlación ({method})")
+            show_plot(fig, key="g_corr_plot")
 
 # ============================================================
-# ASISTENTE (GROQ) EN SU PROPIA PESTAÑA
+# ASISTENTE (GROQ) - EDA GLOBAL (no dependiente del gráfico)
 # ============================================================
 with tab_ai:
     st.subheader("🤖 Asistente de análisis (Groq)")
-    st.caption("Genera un EDA accionable usando un perfil compacto del dataset y el contexto del gráfico dinámico actual.")
+    st.caption("Genera un EDA global y accionable usando un perfil compacto del dataset. No depende del gráfico seleccionado.")
 
     if "groq_analysis_text" not in st.session_state:
         st.session_state["groq_analysis_text"] = ""
@@ -616,22 +596,15 @@ with tab_ai:
                     max_rows=max_rows_profile
                 )
 
-                chart_context = st.session_state.get("chart_context", {})
-
                 system_prompt = (
                     "Eres un analista senior de datos. Tu tarea es redactar un análisis exploratorio (EDA) "
-                    "de forma profesional y accionable, basado en un perfil del dataset y el contexto del gráfico actual. "
-                    "No inventes valores: usa únicamente lo que está en el perfil/contexto. "
+                    "de forma profesional y accionable, basado en un perfil del dataset. "
+                    "No inventes valores: usa únicamente lo que está en el perfil. "
                     "Estructura la respuesta con encabezados y bullets claros."
                 )
 
                 user_prompt = f"""
-Además del EDA general, tenga en cuenta el gráfico actual seleccionado por el usuario:
-
-Contexto del gráfico:
-{chart_context}
-
-Con base en este perfil del dataset (en formato dict/JSON), genere:
+Con base en este perfil del dataset (dict/JSON), genere un EDA GLOBAL:
 
 1) Resumen ejecutivo (3-6 bullets).
 2) Estadística descriptiva relevante (numéricas: rangos, dispersión, sesgos; categóricas: concentración).
@@ -639,7 +612,6 @@ Con base en este perfil del dataset (en formato dict/JSON), genere:
 4) Riesgos y advertencias: nulos, duplicados, tipos sospechosos, variables casi constantes, posibles errores de captura.
 5) Recomendaciones prácticas: qué limpiar, qué transformar (log/escala), qué variables revisar para modelado.
 6) Si hay datetime: sugerir análisis temporal posible.
-7) Recomendaciones específicas según el gráfico actual (qué mirar, qué validaciones hacer, hipótesis).
 
 Enfoque adicional del usuario (si aplica): {extra_focus if extra_focus.strip() else "N/A"}
 
@@ -665,7 +637,8 @@ Perfil:
             data=st.session_state["groq_analysis_text"].encode("utf-8"),
             file_name="analisis_eda_groq.txt",
             mime="text/plain",
-            use_container_width=True
+            use_container_width=True,
+            key="groq_download"
         )
     else:
         st.info("Configure la API Key y presione **Generar análisis descriptivo** para obtener hallazgos y conclusiones.")

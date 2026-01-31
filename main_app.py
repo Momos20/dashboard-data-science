@@ -26,7 +26,6 @@ st.markdown(
 st.title("📊 EDA Multinodal")
 st.caption("Funciona con cualquier CSV. 4 pestañas: Cuantitativo, Cualitativo, Gráfico dinámico, Asistente (Groq).")
 
-# Helper para evitar DuplicateElementId en charts
 def show_plot(fig, key: str):
     st.plotly_chart(fig, use_container_width=True, key=key)
 
@@ -77,7 +76,7 @@ downsample_n = (
 )
 
 # ============================================================
-# NODO 1 - LOADER ROBUSTO (y arregla caso 1-columna)
+# NODO 1 - LOADER ROBUSTO
 # ============================================================
 @st.cache_data(show_spinner=False)
 def read_csv_try(file, sep, encoding, decimal, na_values):
@@ -86,7 +85,6 @@ def read_csv_try(file, sep, encoding, decimal, na_values):
 
 @st.cache_data(show_spinner=False)
 def load_csv_smart(file, sep, encoding, decimal, na_values, auto_fix=True):
-    # intento 1: lo que el usuario puso
     try:
         df = read_csv_try(file, sep, encoding, decimal, na_values)
     except Exception:
@@ -94,7 +92,6 @@ def load_csv_smart(file, sep, encoding, decimal, na_values, auto_fix=True):
             raise
         df = None
 
-    # si falló o vino raro, probar combinaciones
     if df is None and auto_fix:
         candidates = [
             {"sep": ";", "decimal": ","},
@@ -113,7 +110,6 @@ def load_csv_smart(file, sep, encoding, decimal, na_values, auto_fix=True):
         if df is None:
             raise last_err
 
-    # ✅ Caso típico: separador incorrecto => 1 columna gigante
     if auto_fix and df is not None and df.shape[1] == 1:
         col0 = df.columns[0]
         sample = df[col0].astype("string").head(30).fillna("")
@@ -150,12 +146,12 @@ if uploaded is None:
 df_raw = load_csv_smart(uploaded, sep, encoding, decimal, na_values, auto_fix=auto_fix)
 
 # ============================================================
-# NODO 2 - COERCIÓN NUMÉRICA (mejorada)
+# NODO 2 - COERCIÓN NUMÉRICA
 # ============================================================
 def _normalize_numeric_text(s: pd.Series) -> pd.Series:
     x = s.astype("string").str.strip()
-    x = x.str.replace(r"^\((.*)\)$", r"-\1", regex=True)     # negativos en paréntesis
-    x = x.str.replace(r"[^\d\-\.,]", "", regex=True)         # limpiar símbolos
+    x = x.str.replace(r"^\((.*)\)$", r"-\1", regex=True)
+    x = x.str.replace(r"[^\d\-\.,]", "", regex=True)
     return x
 
 @st.cache_data(show_spinner=False)
@@ -168,17 +164,13 @@ def coerce_numeric_like_columns(data: pd.DataFrame, threshold=0.75):
         if not (pd.api.types.is_object_dtype(data[c]) or str(data[c].dtype) == "category"):
             continue
 
-        s = data[c]
-        x = _normalize_numeric_text(s)
-
+        x = _normalize_numeric_text(data[c])
         if x.dropna().empty:
             continue
 
-        # LATAM: 1.234,56 -> 1234.56
         a = x.str.replace(".", "", regex=False).str.replace(",", ".", regex=False)
         na = pd.to_numeric(a, errors="coerce")
 
-        # US: 1,234.56 -> 1234.56
         b = x.str.replace(",", "", regex=False)
         nb = pd.to_numeric(b, errors="coerce")
 
@@ -268,7 +260,11 @@ with st.expander("Vista rápida (primeras filas)", expanded=False):
 # ============================================================
 # FUNCIONES PARA IA (GROQ)
 # ============================================================
-def build_eda_profile_for_llm(df: pd.DataFrame, num_cols, cat_cols, dt_cols, max_rows=1000) -> dict:
+def build_eda_profile_for_llm(df: pd.DataFrame, num_cols, cat_cols, dt_cols) -> dict:
+    """
+    Perfil compacto (no manda el dataset completo).
+    Nota: mantiene límites internos razonables para no reventar tokens.
+    """
     prof = {
         "shape": {"rows": int(df.shape[0]), "cols": int(df.shape[1])},
         "duplicates": int(df.duplicated().sum()),
@@ -300,7 +296,6 @@ def build_eda_profile_for_llm(df: pd.DataFrame, num_cols, cat_cols, dt_cols, max
         for c in num_cols:
             s = df[c]
             zeros[c] = int((s == 0).sum())
-
             s2 = s.dropna()
             if len(s2) >= 8:
                 q1, q3 = np.percentile(s2, 25), np.percentile(s2, 75)
@@ -347,9 +342,8 @@ def build_eda_profile_for_llm(df: pd.DataFrame, num_cols, cat_cols, dt_cols, max
                 }
         prof["datetime_summary"]["ranges"] = dt_summary
 
-    sample = df.head(max_rows).copy()
-    prof["sample_head"] = sample.head(8).astype("string").to_dict(orient="records")
-
+    # Muestra pequeña fija (solo 8 filas) para contexto mínimo
+    prof["sample_head"] = df.head(8).astype("string").to_dict(orient="records")
     return prof
 
 def groq_chat_completion(api_key: str, model: str, system: str, user: str) -> str:
@@ -543,7 +537,7 @@ with tab_g:
             show_plot(fig, key="g_corr_plot")
 
 # ============================================================
-# ASISTENTE (GROQ) - EDA GLOBAL (no dependiente del gráfico)
+# ASISTENTE (GROQ) - EDA GLOBAL
 # ============================================================
 with tab_ai:
     st.subheader("🤖 Asistente de análisis (Groq)")
@@ -568,12 +562,6 @@ with tab_ai:
             key="groq_model"
         )
 
-        max_rows_profile = st.slider(
-            "Muestras para perfilado (para limitar tamaño del prompt)",
-            200, 5000, 1000, 100,
-            key="groq_max_rows"
-        )
-
         extra_focus = st.text_area(
             "Enfoque adicional (opcional)",
             placeholder="Ej: 'enfocarse en calidad de datos, outliers y variables clave para predicción'.",
@@ -592,8 +580,7 @@ with tab_ai:
                     df=df,
                     num_cols=num_cols,
                     cat_cols=cat_cols,
-                    dt_cols=dt_cols,
-                    max_rows=max_rows_profile
+                    dt_cols=dt_cols
                 )
 
                 system_prompt = (
@@ -644,3 +631,4 @@ Perfil:
         st.info("Configure la API Key y presione **Generar análisis descriptivo** para obtener hallazgos y conclusiones.")
 
 st.caption("EDA multinodal y agnóstico al dataset ✅")
+

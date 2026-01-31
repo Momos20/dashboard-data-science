@@ -23,7 +23,7 @@ st.markdown(
 )
 
 st.title("📊 EDA - Monitoreo Ambiental")
-st.caption("EDA organizado en 3 bloques: Cuantitativo, Cualitativo y Gráfico (dinámico).")
+st.caption("EDA en 3 bloques: Cuantitativo, Cualitativo y Gráfico (dinámico).")
 
 # ------------------------------------------------------------
 # Sidebar: upload + read options (FIX decimal)
@@ -63,7 +63,7 @@ auto_fix = st.sidebar.checkbox("Intentar auto-detección (sep/decimal)", value=T
 # ------------------------------------------------------------
 @st.cache_data(show_spinner=False)
 def load_csv_autofix(file, sep, encoding, decimal, na_values, auto_fix=True):
-    # 1) intento con lo que el usuario puso
+    # 1) intento con parámetros del usuario
     try:
         file.seek(0)
         return pd.read_csv(file, sep=sep, encoding=encoding, decimal=decimal, na_values=na_values)
@@ -71,16 +71,29 @@ def load_csv_autofix(file, sep, encoding, decimal, na_values, auto_fix=True):
         if not auto_fix:
             raise
 
-    # 2) heurística común LATAM: sep=';' y decimal=','
-    try:
-        file.seek(0)
-        return pd.read_csv(file, sep=";", encoding=encoding, decimal=",", na_values=na_values)
-    except Exception:
-        pass
+    # 2) heurísticas comunes: LATAM/Europa
+    candidates = [
+        {"sep": ";", "decimal": ","},
+        {"sep": ";", "decimal": "."},
+        {"sep": ",", "decimal": "."},
+        {"sep": ",", "decimal": ","},
+        {"sep": "\t", "decimal": "."},
+    ]
 
-    # 3) fallback clásico
+    last_err = None
+    for cfg in candidates:
+        try:
+            file.seek(0)
+            return pd.read_csv(file, sep=cfg["sep"], encoding=encoding, decimal=cfg["decimal"], na_values=na_values)
+        except Exception as e:
+            last_err = e
+
+    # 3) fallback final
     file.seek(0)
-    return pd.read_csv(file, sep=",", encoding=encoding, decimal=".", na_values=na_values)
+    try:
+        return pd.read_csv(file, encoding=encoding, na_values=na_values)
+    except Exception as e:
+        raise last_err or e
 
 if uploaded is None:
     st.info("⬅️ Suba un archivo CSV desde el panel izquierdo para comenzar.")
@@ -89,7 +102,67 @@ if uploaded is None:
 df = load_csv_autofix(uploaded, sep, encoding, decimal, na_values, auto_fix=auto_fix)
 
 # ------------------------------------------------------------
-# Datetime detection
+# Coerción a numérico (CLAVE para "sí hay variables numéricas")
+# ------------------------------------------------------------
+def coerce_numeric_like_columns(data: pd.DataFrame, threshold=0.85):
+    """
+    Intenta convertir columnas object a numéricas si parecen números.
+    Soporta:
+      - coma decimal: "12,3"
+      - separador de miles: "1.234,5" o "1,234.5"
+      - espacios: "  10 "
+    threshold: % mínimo de valores convertibles (no-NA) para aceptar conversión
+    """
+    data = data.copy()
+
+    for c in data.columns:
+        if pd.api.types.is_numeric_dtype(data[c]) or pd.api.types.is_datetime64_any_dtype(data[c]) or pd.api.types.is_bool_dtype(data[c]):
+            continue
+        if not pd.api.types.is_object_dtype(data[c]) and str(data[c].dtype) != "category":
+            continue
+
+        s = data[c].astype("string").str.strip()
+
+        # si la mayoría son vacíos, no tocar
+        non_na = s.dropna()
+        if len(non_na) == 0:
+            continue
+
+        # normalización: quitar espacios
+        s2 = s
+
+        # caso 1: estilo "1.234,56" -> miles '.' y decimal ','
+        # caso 2: estilo "1,234.56" -> miles ',' y decimal '.'
+        # intentamos dos normalizaciones y tomamos la mejor
+        def to_num_variant(v: pd.Series, variant: str):
+            if variant == "comma_decimal":
+                # miles '.' -> nada, decimal ',' -> '.'
+                x = v.str.replace(".", "", regex=False).str.replace(",", ".", regex=False)
+            else:
+                # miles ',' -> nada, decimal '.' -> '.'
+                x = v.str.replace(",", "", regex=False)
+            return pd.to_numeric(x, errors="coerce")
+
+        num1 = to_num_variant(s2, "comma_decimal")
+        num2 = to_num_variant(s2, "dot_decimal")
+
+        # elegimos la variante con más convertibles
+        ok1 = num1.notna().mean()
+        ok2 = num2.notna().mean()
+
+        best = num1 if ok1 >= ok2 else num2
+        ok = max(ok1, ok2)
+
+        # aceptar solo si convierte suficiente
+        if ok >= threshold:
+            data[c] = best
+
+    return data
+
+df = coerce_numeric_like_columns(df, threshold=0.85)
+
+# ------------------------------------------------------------
+# Datetime detection (mejorado)
 # ------------------------------------------------------------
 DATETIME_HINTS = ["fecha", "date", "hora", "time", "timestamp", "datetime", "created", "updated"]
 
@@ -166,7 +239,11 @@ with tab_qt:
     st.subheader("📐 Bloque Cuantitativo")
 
     if not num_cols:
-        st.warning("No hay columnas numéricas.")
+        st.warning(
+            "No se detectaron columnas numéricas. "
+            "Revise separador/decimal o active 'auto-detección'. "
+            "Este script ya intenta convertir columnas numéricas aunque vengan como texto."
+        )
     else:
         st.markdown("### Estadísticas descriptivas")
         st.dataframe(df[num_cols].describe().T, use_container_width=True)

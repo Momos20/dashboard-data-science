@@ -26,31 +26,67 @@ st.title("📊 EDA - Monitoreo Ambiental")
 st.caption("EDA organizado en 3 bloques: Cuantitativo, Cualitativo y Gráfico (dinámico).")
 
 # ------------------------------------------------------------
-# Sidebar: upload + read options
+# Sidebar: upload + read options (FIX decimal)
 # ------------------------------------------------------------
 st.sidebar.header("⚙️ Carga y configuración")
 uploaded = st.sidebar.file_uploader("Suba su archivo CSV", type=["csv"])
 
 with st.sidebar.expander("Opciones de lectura", expanded=False):
-    sep = st.text_input("Separador (opcional)", value="")
-    encoding = st.text_input("Encoding (opcional)", value="")
-    decimal = st.text_input("Decimal (opcional)", value="")
-    na_values = st.text_input("NA values (coma-separado)", value="")
+    sep_in = st.text_input("Separador (opcional)", value="")
+    encoding_in = st.text_input("Encoding (opcional)", value="")
+    decimal_in = st.text_input("Decimal (opcional: '.' o ',')", value="")
+    na_values_in = st.text_input("NA values (coma-separado)", value="")
 
-sep = sep.strip() or None
-encoding = encoding.strip() or None
-decimal = decimal.strip() or None
-na_values = [x.strip() for x in na_values.split(",") if x.strip()] or None
+def clean_optional_str(x: str):
+    x = (x or "").strip()
+    return x if x else None
+
+sep = clean_optional_str(sep_in)
+encoding = clean_optional_str(encoding_in)
+
+# ✅ decimal: solo '.' o ',' o None
+decimal_raw = (decimal_in or "").strip()
+if decimal_raw == "":
+    decimal = None
+elif decimal_raw in [".", ","]:
+    decimal = decimal_raw
+else:
+    st.sidebar.warning("Decimal inválido. Use '.' o ','. Se usará '.'.")
+    decimal = "."
+
+na_values = [t.strip() for t in (na_values_in or "").split(",") if t.strip()] or None
+
+auto_fix = st.sidebar.checkbox("Intentar auto-detección (sep/decimal)", value=True)
+
+# ------------------------------------------------------------
+# Loader robusto
+# ------------------------------------------------------------
+@st.cache_data(show_spinner=False)
+def load_csv_autofix(file, sep, encoding, decimal, na_values, auto_fix=True):
+    # 1) intento con lo que el usuario puso
+    try:
+        file.seek(0)
+        return pd.read_csv(file, sep=sep, encoding=encoding, decimal=decimal, na_values=na_values)
+    except Exception:
+        if not auto_fix:
+            raise
+
+    # 2) heurística común LATAM: sep=';' y decimal=','
+    try:
+        file.seek(0)
+        return pd.read_csv(file, sep=";", encoding=encoding, decimal=",", na_values=na_values)
+    except Exception:
+        pass
+
+    # 3) fallback clásico
+    file.seek(0)
+    return pd.read_csv(file, sep=",", encoding=encoding, decimal=".", na_values=na_values)
 
 if uploaded is None:
     st.info("⬅️ Suba un archivo CSV desde el panel izquierdo para comenzar.")
     st.stop()
 
-@st.cache_data(show_spinner=False)
-def load_csv(file, sep, encoding, decimal, na_values):
-    return pd.read_csv(file, sep=sep, encoding=encoding, decimal=decimal, na_values=na_values)
-
-df = load_csv(uploaded, sep, encoding, decimal, na_values)
+df = load_csv_autofix(uploaded, sep, encoding, decimal, na_values, auto_fix=auto_fix)
 
 # ------------------------------------------------------------
 # Datetime detection
@@ -168,7 +204,6 @@ with tab_qt:
             method = st.radio("Método", ["pearson", "spearman"], horizontal=True, key="corr_method")
             corr = df[num_cols].corr(method=method)
 
-            # Triangular (menos ruido)
             corr_tri = corr.copy()
             corr_tri.values[np.triu_indices_from(corr_tri.values, k=1)] = np.nan
 
@@ -269,6 +304,7 @@ with tab_g:
             "Scatter (num vs num)",
             "Serie temporal (datetime vs num)",
             "Barras (categórica)",
+            "Heatmap correlación (numéricas)",
         ],
         key="chart_type"
     )
@@ -357,6 +393,16 @@ with tab_g:
 
             fig = px.bar(vc, x="conteo", y=col, orientation="h", title=f"Top {topn}: {col}")
             fig.update_layout(yaxis_title="", xaxis_title="conteo")
+            st.plotly_chart(fig, use_container_width=True)
+
+    elif chart_type == "Heatmap correlación (numéricas)":
+        if len(num_cols) < 2:
+            st.info("Se requieren al menos 2 columnas numéricas.")
+        else:
+            method = st.radio("Método", ["pearson", "spearman"], horizontal=True, key="g_corr_method")
+            corr = df[num_cols].corr(method=method)
+
+            fig = px.imshow(corr, text_auto=False, aspect="auto", title=f"Heatmap correlación ({method})")
             st.plotly_chart(fig, use_container_width=True)
 
 st.caption("EDA interactivo – 3 bloques (Cuantitativo / Cualitativo / Gráfico dinámico) ✅")

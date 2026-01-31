@@ -24,7 +24,7 @@ st.markdown(
 )
 
 st.title("📊 EDA Multinodal")
-st.caption("Funciona con cualquier CSV. 3 bloques: Cuantitativo, Cualitativo, Gráfico dinámico (con asistente IA al lado).")
+st.caption("Funciona con cualquier CSV. 4 pestañas: Cuantitativo, Cualitativo, Gráfico dinámico, Asistente (Groq).")
 
 # ============================================================
 # SIDEBAR - CONTROLES
@@ -87,7 +87,7 @@ def load_csv_smart(file, sep, encoding, decimal, na_values, auto_fix=True):
             raise
         df = None
 
-    # si falló, probar combinaciones
+    # si falló o vino raro, probar combinaciones
     if df is None and auto_fix:
         candidates = [
             {"sep": ";", "decimal": ","},
@@ -247,7 +247,7 @@ def maybe_downsample(data: pd.DataFrame):
 df_plot = maybe_downsample(df)
 
 # ============================================================
-# DEBUG (para ver el problema cuando diga "no hay numéricas")
+# DEBUG
 # ============================================================
 with st.expander("🧪 Debug: detección de tipos (abrir si algo falla)", expanded=False):
     st.write("Shape:", df.shape)
@@ -277,10 +277,6 @@ with st.expander("Vista rápida (primeras filas)", expanded=False):
 # FUNCIONES PARA IA (GROQ)
 # ============================================================
 def build_eda_profile_for_llm(df: pd.DataFrame, num_cols, cat_cols, dt_cols, max_rows=1000) -> dict:
-    """
-    Construye un perfil compacto y agnóstico al dataset para enviar al LLM.
-    Evita mandar el dataset completo (costoso e innecesario).
-    """
     prof = {
         "shape": {"rows": int(df.shape[0]), "cols": int(df.shape[1])},
         "duplicates": int(df.duplicated().sum()),
@@ -292,7 +288,6 @@ def build_eda_profile_for_llm(df: pd.DataFrame, num_cols, cat_cols, dt_cols, max
         "correlation_top_pairs": [],
     }
 
-    # Column profile (dtype, missing %, nunique)
     for c in df.columns:
         s = df[c]
         prof["columns"].append({
@@ -303,14 +298,12 @@ def build_eda_profile_for_llm(df: pd.DataFrame, num_cols, cat_cols, dt_cols, max
             "nunique": int(s.nunique(dropna=True)),
         })
 
-    # Numeric summary
     if num_cols:
         num = df[num_cols].copy()
         desc = num.describe(percentiles=[0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99]).T
-        desc = desc.round(4)  # reducir tokens
+        desc = desc.round(4)
         prof["numeric_summary"]["describe"] = desc.to_dict()
 
-        # zeros/outliers quick scan
         zeros = {}
         outliers_iqr = {}
         for c in num_cols:
@@ -332,7 +325,6 @@ def build_eda_profile_for_llm(df: pd.DataFrame, num_cols, cat_cols, dt_cols, max
         prof["numeric_summary"]["zeros"] = zeros
         prof["numeric_summary"]["outliers_iqr"] = outliers_iqr
 
-        # Correlation top pairs (limit)
         if len(num_cols) >= 2:
             corr = df[num_cols].corr(method="pearson")
             pairs = (
@@ -345,15 +337,13 @@ def build_eda_profile_for_llm(df: pd.DataFrame, num_cols, cat_cols, dt_cols, max
             top = pairs.sort_values("abs", ascending=False).head(15)
             prof["correlation_top_pairs"] = top[["var1", "var2", "corr"]].round(4).to_dict(orient="records")
 
-    # Categorical summary (top values)
     if cat_cols:
         cat_summary = {}
-        for c in cat_cols[:30]:  # limitar cantidad
+        for c in cat_cols[:30]:
             vc = df[c].astype("string").value_counts(dropna=False).head(10)
             cat_summary[str(c)] = vc.to_dict()
         prof["categorical_summary"]["top_values"] = cat_summary
 
-    # Datetime summary
     if dt_cols:
         dt_summary = {}
         for c in dt_cols[:10]:
@@ -366,14 +356,12 @@ def build_eda_profile_for_llm(df: pd.DataFrame, num_cols, cat_cols, dt_cols, max
                 }
         prof["datetime_summary"]["ranges"] = dt_summary
 
-    # Sample rows (small) for context (sin PII idealmente), limited
     sample = df.head(max_rows).copy()
     prof["sample_head"] = sample.head(8).astype("string").to_dict(orient="records")
 
     return prof
 
 def groq_chat_completion(api_key: str, model: str, system: str, user: str) -> str:
-    # Import local para no romper si el paquete no está instalado en dev
     from groq import Groq
     client = Groq(api_key=api_key)
     completion = client.chat.completions.create(
@@ -388,9 +376,11 @@ def groq_chat_completion(api_key: str, model: str, system: str, user: str) -> st
     return completion.choices[0].message.content
 
 # ============================================================
-# 3 BLOQUES
+# 4 PESTAÑAS
 # ============================================================
-tab_qt, tab_ql, tab_g = st.tabs(["📐 Cuantitativo", "🗂️ Cualitativo", "🎛️ Gráfico (dinámico)"])
+tab_qt, tab_ql, tab_g, tab_ai = st.tabs(
+    ["📐 Cuantitativo", "🗂️ Cualitativo", "🎛️ Gráfico (dinámico)", "🤖 Asistente (Groq)"]
+)
 
 # ============================================================
 # CUANTITATIVO + CORRELACIÓN
@@ -491,174 +481,151 @@ with tab_ql:
                         use_container_width=True)
 
 # ============================================================
-# GRÁFICO DINÁMICO + IA (AL LADO)
+# GRÁFICO DINÁMICO (sin asistente aquí)
 # ============================================================
 with tab_g:
     st.subheader("🎛️ Gráfico (dinámico)")
 
-    left, right = st.columns([2.2, 1], gap="large")
+    chart_type = st.selectbox(
+        "Tipo de gráfico",
+        ["Histograma (numérica)", "Boxplot (numérica)", "Scatter (num vs num)",
+         "Serie temporal (datetime vs num)", "Barras (categórica)", "Heatmap correlación (numéricas)"],
+        key="chart_type"
+    )
 
-    # -------------------------
-    # IZQUIERDA: gráfico
-    # -------------------------
-    with left:
-        chart_type = st.selectbox(
-            "Tipo de gráfico",
-            ["Histograma (numérica)", "Boxplot (numérica)", "Scatter (num vs num)",
-             "Serie temporal (datetime vs num)", "Barras (categórica)", "Heatmap correlación (numéricas)"],
-            key="chart_type"
+    chart_ctx = {"chart_type": chart_type}
+
+    if chart_type == "Histograma (numérica)":
+        if not num_cols:
+            st.warning("No hay columnas numéricas.")
+        else:
+            col = st.selectbox("Variable", num_cols, key="g_hist_col")
+            bins = st.slider("Bins", 10, 200, 40, key="g_hist_bins")
+            chart_ctx.update({"x": col, "bins": int(bins)})
+            st.plotly_chart(px.histogram(df_plot, x=col, nbins=bins, title=f"Histograma: {col}"),
+                            use_container_width=True)
+
+    elif chart_type == "Boxplot (numérica)":
+        if not num_cols:
+            st.warning("No hay columnas numéricas.")
+        else:
+            col = st.selectbox("Variable", num_cols, key="g_box_col")
+            chart_ctx.update({"y": col})
+            st.plotly_chart(px.box(df_plot, y=col, points="outliers", title=f"Boxplot: {col}"),
+                            use_container_width=True)
+
+    elif chart_type == "Scatter (num vs num)":
+        if len(num_cols) < 2:
+            st.info("Se requieren al menos 2 columnas numéricas.")
+        else:
+            x = st.selectbox("X", num_cols, key="g_scatter_x")
+            y = st.selectbox("Y", [c for c in num_cols if c != x], key="g_scatter_y")
+            chart_ctx.update({"x": x, "y": y})
+            st.plotly_chart(px.scatter(df_plot, x=x, y=y, trendline="ols", opacity=0.65, title=f"{y} vs {x}"),
+                            use_container_width=True)
+
+    elif chart_type == "Serie temporal (datetime vs num)":
+        if not dt_cols:
+            st.info("No se detectaron columnas datetime.")
+        elif not num_cols:
+            st.info("No hay columnas numéricas.")
+        else:
+            dt = st.selectbox("Datetime", dt_cols, key="g_time_dt")
+            y = st.selectbox("Y", num_cols, key="g_time_y")
+            chart_ctx.update({"dt": dt, "y": y})
+            tmp = df[[dt, y]].dropna().sort_values(dt)
+            st.plotly_chart(px.line(tmp, x=dt, y=y, title=f"Serie temporal: {y}"),
+                            use_container_width=True)
+
+    elif chart_type == "Barras (categórica)":
+        if not cat_cols:
+            st.info("No hay columnas categóricas.")
+        else:
+            col = st.selectbox("Categoría", cat_cols, key="g_bar_col")
+            topn = st.slider("Top N", 5, 80, 15, key="g_bar_topn")
+            chart_ctx.update({"cat": col, "topn": int(topn)})
+            vc = df[col].astype("string").value_counts(dropna=False).head(topn).reset_index()
+            vc.columns = [col, "conteo"]
+            st.plotly_chart(px.bar(vc, x="conteo", y=col, orientation="h", title=f"Top {topn}: {col}"),
+                            use_container_width=True)
+
+    elif chart_type == "Heatmap correlación (numéricas)":
+        if len(num_cols) < 2:
+            st.info("Se requieren al menos 2 columnas numéricas.")
+        else:
+            method = st.radio("Método", ["pearson", "spearman"], horizontal=True, key="g_corr_method")
+            chart_ctx.update({"corr_method": method})
+            corr = df[num_cols].corr(method=method)
+            st.plotly_chart(px.imshow(corr, aspect="auto", title=f"Heatmap correlación ({method})"),
+                            use_container_width=True)
+
+    # Guardar contexto del gráfico (para que el asistente lo use)
+    st.session_state["chart_context"] = chart_ctx
+
+# ============================================================
+# ASISTENTE (GROQ) EN SU PROPIA PESTAÑA
+# ============================================================
+with tab_ai:
+    st.subheader("🤖 Asistente de análisis (Groq)")
+    st.caption("Genera un EDA accionable usando un perfil compacto del dataset y el contexto del gráfico dinámico actual.")
+
+    if "groq_analysis_text" not in st.session_state:
+        st.session_state["groq_analysis_text"] = ""
+
+    with st.expander("Configurar y ejecutar (API Key + análisis)", expanded=True):
+        groq_api_key = st.text_input(
+            "GROQ API Key",
+            type="password",
+            help="Pegue aquí su API Key de Groq. Se usa solo para esta sesión.",
+            key="groq_api_key"
         )
 
-        chart_ctx = {"chart_type": chart_type}
+        model_name = st.selectbox(
+            "Modelo",
+            options=["llama-3.3-70b-versatile"],
+            index=0,
+            help="Modelo recomendado para análisis general.",
+            key="groq_model"
+        )
 
-        if chart_type == "Histograma (numérica)":
-            if not num_cols:
-                st.warning("No hay columnas numéricas.")
-            else:
-                col = st.selectbox("Variable", num_cols, key="g_hist_col")
-                bins = st.slider("Bins", 10, 200, 40, key="g_hist_bins")
-                chart_ctx.update({"x": col, "bins": int(bins)})
+        max_rows_profile = st.slider(
+            "Muestras para perfilado (para limitar tamaño del prompt)",
+            200, 5000, 1000, 100,
+            key="groq_max_rows"
+        )
 
-                st.plotly_chart(
-                    px.histogram(df_plot, x=col, nbins=bins, title=f"Histograma: {col}"),
-                    use_container_width=True
+        extra_focus = st.text_area(
+            "Enfoque adicional (opcional)",
+            placeholder="Ej: 'enfocarse en calidad de datos, outliers y variables clave para predicción'.",
+            height=100,
+            key="groq_extra_focus"
+        )
+
+        run_btn = st.button("🧠 Generar análisis descriptivo", type="primary", use_container_width=True, key="groq_run")
+
+    if run_btn:
+        if not groq_api_key or len(groq_api_key.strip()) < 10:
+            st.error("Ingrese una GROQ API Key válida para ejecutar el análisis.")
+        else:
+            with st.spinner("Generando análisis con Groq..."):
+                profile = build_eda_profile_for_llm(
+                    df=df,
+                    num_cols=num_cols,
+                    cat_cols=cat_cols,
+                    dt_cols=dt_cols,
+                    max_rows=max_rows_profile
                 )
 
-        elif chart_type == "Boxplot (numérica)":
-            if not num_cols:
-                st.warning("No hay columnas numéricas.")
-            else:
-                col = st.selectbox("Variable", num_cols, key="g_box_col")
-                chart_ctx.update({"y": col})
+                chart_context = st.session_state.get("chart_context", {})
 
-                st.plotly_chart(
-                    px.box(df_plot, y=col, points="outliers", title=f"Boxplot: {col}"),
-                    use_container_width=True
+                system_prompt = (
+                    "Eres un analista senior de datos. Tu tarea es redactar un análisis exploratorio (EDA) "
+                    "de forma profesional y accionable, basado en un perfil del dataset y el contexto del gráfico actual. "
+                    "No inventes valores: usa únicamente lo que está en el perfil/contexto. "
+                    "Estructura la respuesta con encabezados y bullets claros."
                 )
 
-        elif chart_type == "Scatter (num vs num)":
-            if len(num_cols) < 2:
-                st.info("Se requieren al menos 2 columnas numéricas.")
-            else:
-                x = st.selectbox("X", num_cols, key="g_scatter_x")
-                y = st.selectbox("Y", [c for c in num_cols if c != x], key="g_scatter_y")
-                chart_ctx.update({"x": x, "y": y})
-
-                st.plotly_chart(
-                    px.scatter(df_plot, x=x, y=y, trendline="ols", opacity=0.65, title=f"{y} vs {x}"),
-                    use_container_width=True
-                )
-
-        elif chart_type == "Serie temporal (datetime vs num)":
-            if not dt_cols:
-                st.info("No se detectaron columnas datetime.")
-            elif not num_cols:
-                st.info("No hay columnas numéricas.")
-            else:
-                dt = st.selectbox("Datetime", dt_cols, key="g_time_dt")
-                y = st.selectbox("Y", num_cols, key="g_time_y")
-                chart_ctx.update({"dt": dt, "y": y})
-
-                tmp = df[[dt, y]].dropna().sort_values(dt)
-                st.plotly_chart(
-                    px.line(tmp, x=dt, y=y, title=f"Serie temporal: {y}"),
-                    use_container_width=True
-                )
-
-        elif chart_type == "Barras (categórica)":
-            if not cat_cols:
-                st.info("No hay columnas categóricas.")
-            else:
-                col = st.selectbox("Categoría", cat_cols, key="g_bar_col")
-                topn = st.slider("Top N", 5, 80, 15, key="g_bar_topn")
-                chart_ctx.update({"cat": col, "topn": int(topn)})
-
-                vc = df[col].astype("string").value_counts(dropna=False).head(topn).reset_index()
-                vc.columns = [col, "conteo"]
-                st.plotly_chart(
-                    px.bar(vc, x="conteo", y=col, orientation="h", title=f"Top {topn}: {col}"),
-                    use_container_width=True
-                )
-
-        elif chart_type == "Heatmap correlación (numéricas)":
-            if len(num_cols) < 2:
-                st.info("Se requieren al menos 2 columnas numéricas.")
-            else:
-                method = st.radio("Método", ["pearson", "spearman"], horizontal=True, key="g_corr_method")
-                chart_ctx.update({"corr_method": method})
-
-                corr = df[num_cols].corr(method=method)
-                st.plotly_chart(
-                    px.imshow(corr, aspect="auto", title=f"Heatmap correlación ({method})"),
-                    use_container_width=True
-                )
-
-        st.session_state["chart_context"] = chart_ctx
-
-    # -------------------------
-    # DERECHA: IA Groq
-    # -------------------------
-    with right:
-        st.markdown("### 🤖 Asistente (Groq)")
-        st.caption("Genera hallazgos usando el perfil del dataset + el contexto del gráfico actual.")
-
-        if "groq_analysis_text" not in st.session_state:
-            st.session_state["groq_analysis_text"] = ""
-
-        with st.expander("Configurar y ejecutar", expanded=True):
-            groq_api_key = st.text_input(
-                "GROQ API Key",
-                type="password",
-                help="Pegue aquí su API Key de Groq. Se usa solo para esta sesión.",
-                key="groq_api_key"
-            )
-
-            model_name = st.selectbox(
-                "Modelo",
-                options=["llama-3.3-70b-versatile"],
-                index=0,
-                help="Modelo recomendado para análisis general.",
-                key="groq_model"
-            )
-
-            max_rows_profile = st.slider(
-                "Muestras para perfilado (para limitar tamaño del prompt)",
-                200, 5000, 1000, 100,
-                key="groq_max_rows"
-            )
-
-            extra_focus = st.text_area(
-                "Enfoque adicional (opcional)",
-                placeholder="Ej: 'enfocarse en calidad de datos, outliers y variables clave para predicción'.",
-                height=90,
-                key="groq_extra_focus"
-            )
-
-            run_btn = st.button("🧠 Generar", type="primary", use_container_width=True, key="groq_run")
-
-        if run_btn:
-            if not groq_api_key or len(groq_api_key.strip()) < 10:
-                st.error("Ingrese una GROQ API Key válida para ejecutar el análisis.")
-            else:
-                with st.spinner("Generando análisis con Groq..."):
-                    profile = build_eda_profile_for_llm(
-                        df=df,
-                        num_cols=num_cols,
-                        cat_cols=cat_cols,
-                        dt_cols=dt_cols,
-                        max_rows=max_rows_profile
-                    )
-
-                    chart_context = st.session_state.get("chart_context", {})
-
-                    system_prompt = (
-                        "Eres un analista senior de datos. Tu tarea es redactar un análisis exploratorio (EDA) "
-                        "de forma profesional y accionable, basado en un perfil del dataset y el contexto del gráfico actual. "
-                        "No inventes valores: usa únicamente lo que está en el perfil/contexto. "
-                        "Estructura la respuesta con encabezados y bullets claros."
-                    )
-
-                    user_prompt = f"""
+                user_prompt = f"""
 Además del EDA general, tenga en cuenta el gráfico actual seleccionado por el usuario:
 
 Contexto del gráfico:
@@ -680,28 +647,27 @@ Perfil:
 {profile}
 """
 
-                    try:
-                        st.session_state["groq_analysis_text"] = groq_chat_completion(
-                            api_key=groq_api_key.strip(),
-                            model=model_name,
-                            system=system_prompt,
-                            user=user_prompt
-                        )
-                    except Exception as e:
-                        st.error(f"Error llamando a Groq: {e}")
+                try:
+                    st.session_state["groq_analysis_text"] = groq_chat_completion(
+                        api_key=groq_api_key.strip(),
+                        model=model_name,
+                        system=system_prompt,
+                        user=user_prompt
+                    )
+                except Exception as e:
+                    st.error(f"Error llamando a Groq: {e}")
 
-        if st.session_state["groq_analysis_text"]:
-            st.markdown("#### 🧾 Resultado")
-            st.write(st.session_state["groq_analysis_text"])
-            st.download_button(
-                "⬇️ Descargar (.txt)",
-                data=st.session_state["groq_analysis_text"].encode("utf-8"),
-                file_name="analisis_eda_groq.txt",
-                mime="text/plain",
-                use_container_width=True
-            )
-        else:
-            st.info("Configure la API Key y presione **Generar**.")
+    if st.session_state["groq_analysis_text"]:
+        st.markdown("### 🧾 Análisis generado")
+        st.write(st.session_state["groq_analysis_text"])
+        st.download_button(
+            "⬇️ Descargar análisis (.txt)",
+            data=st.session_state["groq_analysis_text"].encode("utf-8"),
+            file_name="analisis_eda_groq.txt",
+            mime="text/plain",
+            use_container_width=True
+        )
+    else:
+        st.info("Configure la API Key y presione **Generar análisis descriptivo** para obtener hallazgos y conclusiones.")
 
 st.caption("EDA multinodal y agnóstico al dataset ✅")
-

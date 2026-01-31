@@ -8,3 +8,4 @@ altair
 scipy
 python-dateutil
 statsmodels
+groq

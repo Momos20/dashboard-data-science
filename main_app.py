@@ -361,5 +361,131 @@ with tab_ql:
         vc = df[col].astype("string").value_counts(dropna=False).head(topn).reset_index()
         vc.columns = [col, "conteo"]
 
-        fig = px.bar(
+        fig = px.bar(vc, x="conteo", y=col, orientation="h", title=f"Top {topn}: {col}")
+        fig.update_layout(yaxis_title="", xaxis_title="conteo")
+        st.plotly_chart(fig, use_container_width=True)
+        st.dataframe(vc, use_container_width=True)
+
+# ============================================================
+# NODO GRÁFICO DINÁMICO (canvas universal + correlación incluida)
+# ============================================================
+with tab_g:
+    st.subheader("🎛️ Gráfico (dinámico)")
+    st.caption("Canvas universal: seleccione el tipo de gráfico y variables. Incluye correlación.")
+
+    chart_type = st.selectbox(
+        "Tipo de gráfico",
+        [
+            "Histograma (numérica)",
+            "Boxplot (numérica)",
+            "Scatter (num vs num)",
+            "Serie temporal (datetime vs num)",
+            "Barras (categórica)",
+            "Heatmap correlación (numéricas)",
+        ],
+        key="chart_type"
+    )
+
+    if chart_type == "Histograma (numérica)":
+        if not num_cols:
+            st.warning("No hay columnas numéricas.")
+        else:
+            col = st.selectbox("Variable", num_cols, key="g_hist_col")
+            bins = st.slider("Bins", 10, 200, 40, key="g_hist_bins")
+            log_x = st.checkbox("Escala log (x)", value=False, key="g_hist_log")
+
+            fig = px.histogram(df_plot, x=col, nbins=bins, marginal="rug", title=f"Histograma: {col}")
+            if log_x:
+                fig.update_xaxes(type="log")
+            st.plotly_chart(fig, use_container_width=True)
+
+    elif chart_type == "Boxplot (numérica)":
+        if not num_cols:
+            st.warning("No hay columnas numéricas.")
+        else:
+            col = st.selectbox("Variable", num_cols, key="g_box_col")
+            fig = px.box(df_plot, y=col, points="outliers", title=f"Boxplot: {col}")
+            st.plotly_chart(fig, use_container_width=True)
+
+    elif chart_type == "Scatter (num vs num)":
+        if len(num_cols) < 2:
+            st.info("Se requieren al menos 2 columnas numéricas.")
+        else:
+            x = st.selectbox("X", num_cols, key="g_scatter_x")
+            y = st.selectbox("Y", [c for c in num_cols if c != x], key="g_scatter_y")
+            trend = st.checkbox("Trendline", value=True, key="g_scatter_trend")
+            color = st.selectbox("Color (opcional)", ["(ninguno)"] + cat_cols, key="g_scatter_color")
+
+            # mostrar correlación si aplica
+            method = st.selectbox("Correlación a mostrar", ["(no)", "pearson", "spearman"], key="g_scatter_corr_method")
+            rho_text = ""
+            if method != "(no)":
+                rho = df[[x, y]].corr(method=method).iloc[0, 1]
+                rho_text = f" · corr({method})={rho:.4f}"
+
+            fig = px.scatter(
+                df_plot,
+                x=x, y=y,
+                color=None if color == "(ninguno)" else color,
+                trendline="ols" if trend else None,
+                opacity=0.65,
+                title=f"{y} vs {x}{rho_text}"
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+    elif chart_type == "Serie temporal (datetime vs num)":
+        if not dt_cols:
+            st.info("No se detectaron columnas datetime.")
+        elif not num_cols:
+            st.info("No hay columnas numéricas para graficar en el tiempo.")
+        else:
+            dt = st.selectbox("Datetime", dt_cols, key="g_time_dt")
+            y = st.selectbox("Y (numérica)", num_cols, key="g_time_y")
+
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                freq = st.selectbox("Resample", ["(sin)", "D", "W", "M"], index=1, key="g_time_freq")
+            with c2:
+                agg = st.selectbox("Agregación", ["mean", "median", "sum", "min", "max"], key="g_time_agg")
+            with c3:
+                roll = st.slider("Rolling window", 1, 60, 7, key="g_time_roll")
+
+            tmp = df[[dt, y]].dropna().sort_values(dt)
+            if tmp.empty:
+                st.warning("No hay datos suficientes (todo es NA en fecha o variable).")
+            else:
+                if freq != "(sin)":
+                    tmp = tmp.set_index(dt).resample(freq).agg({y: agg}).reset_index()
+
+                tmp["rolling"] = tmp[y].rolling(roll, min_periods=max(1, roll // 2)).mean()
+
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(x=tmp[dt], y=tmp[y], mode="lines", name=y))
+                fig.add_trace(go.Scatter(x=tmp[dt], y=tmp["rolling"], mode="lines", name=f"rolling({roll})"))
+                fig.update_layout(title=f"Serie temporal: {y}", xaxis_title=str(dt), yaxis_title=y)
+                st.plotly_chart(fig, use_container_width=True)
+
+    elif chart_type == "Barras (categórica)":
+        if not cat_cols:
+            st.info("No hay columnas categóricas.")
+        else:
+            col = st.selectbox("Categoría", cat_cols, key="g_bar_col")
+            topn = st.slider("Top N", 5, 80, 15, key="g_bar_topn")
+            vc = df[col].astype("string").value_counts(dropna=False).head(topn).reset_index()
+            vc.columns = [col, "conteo"]
+
+            fig = px.bar(vc, x="conteo", y=col, orientation="h", title=f"Top {topn}: {col}")
+            fig.update_layout(yaxis_title="", xaxis_title="conteo")
+            st.plotly_chart(fig, use_container_width=True)
+
+    elif chart_type == "Heatmap correlación (numéricas)":
+        if len(num_cols) < 2:
+            st.info("Se requieren al menos 2 columnas numéricas.")
+        else:
+            method = st.radio("Método", ["pearson", "spearman"], horizontal=True, key="g_corr_method")
+            corr = df[num_cols].corr(method=method)
+            fig = px.imshow(corr, aspect="auto", title=f"Heatmap correlación ({method})")
+            st.plotly_chart(fig, use_container_width=True)
+
+st.caption("EDA multinodal y agnóstico al dataset ✅")
 
